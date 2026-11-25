@@ -1,0 +1,6 @@
+nutanix-docs/
+*/passages.jsonl
+*/docs/
+*/chroma/
+__pycache__/
+.venv/
