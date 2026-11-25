@@ -4,3 +4,4 @@ nutanix-docs/
 */chroma/
 __pycache__/
 .venv/
+*/api-specs/

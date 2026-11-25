@@ -9,11 +9,17 @@ text passages an agent can search.
 It uses the endpoints the Support Portal website itself calls. They are not
 a published, versioned API and may change without notice.
 
-Two steps:
+It can also download the published OpenAPI files for the Nutanix v4 APIs
+from developers.nutanix.com (``api-specs``), which an agent can read
+directly to write API calls and tests.
+
+Steps:
 
   1. download  -> passages.jsonl (one JSON object per passage: url, title,
                   product, version, text). Plain data: load it into any
                   vector store or search engine your agent already uses.
+  api-specs    -> api-specs/<area>-<version>.yaml (OpenAPI), optionally
+                  with Postman collections.
   2. index     -> optional: a local Chroma collection built from
                   passages.jsonl with any sentence-transformers model.
 
@@ -22,6 +28,7 @@ Examples:
   pip install httpx beautifulsoup4
   python nutanix_docs_sample.py products
   python nutanix_docs_sample.py download --product "Nutanix Kubernetes Platform" --out nkp
+  python nutanix_docs_sample.py api-specs --out nkp
 
   pip install chromadb sentence-transformers
   python nutanix_docs_sample.py index --out nkp --model <embedding model>
@@ -51,6 +58,8 @@ KB_URL = PORTAL + "/kb/"
 KB_REF = re.compile(r"\bKB[- ]?(\d{4,6})\b")
 SKIP_TITLE = re.compile(r"API Reference|This Document Has Been Removed", re.I)
 PASSAGE_CHARS = 1500
+DEVELOPERS = "https://developers.nutanix.com"
+GA_VERSION = re.compile(r"v(\d+)\.(\d+)")  # v4.4 yes; v4.0.b2 (preview) no
 
 
 class Portal:
@@ -216,6 +225,38 @@ def download(args) -> None:
     print(f"wrote {count} passages to {out / 'passages.jsonl'}")
 
 
+def api_specs(args) -> None:
+    """The published OpenAPI files for every Nutanix v4 API area."""
+    out = Path(args.out) / "api-specs"
+    out.mkdir(parents=True, exist_ok=True)
+    http = httpx.Client(timeout=120, follow_redirects=True, headers={"User-Agent": "nutanix-docs-sample/1.0"})
+    namespaces = http.get(f"{DEVELOPERS}/api/v1/namespaces/").json().get("namespaces", [])
+    names = args.api or sorted(n["name"] for n in namespaces if n.get("name"))
+    saved = []
+    for name in names:
+        rows = http.get(f"{DEVELOPERS}/api/v1/namespaces/{quote(name)}/versions/").json().get("versions", [])
+        ga = sorted(
+            (r for r in rows if GA_VERSION.fullmatch(str(r.get("version")))),
+            key=lambda r: tuple(int(x) for x in GA_VERSION.fullmatch(r["version"]).groups()),
+            reverse=True,
+        )[: args.versions]
+        for row in ga:
+            version = row["version"]
+            spec = http.get(row.get("link") or f"{DEVELOPERS}/api/v1/namespaces/{name}/versions/{version}/yaml")
+            if spec.status_code != 200:
+                print(f"{name} {version}: not published ({spec.status_code})", flush=True)
+                continue
+            (out / f"{name}-{version}.yaml").write_bytes(spec.content)
+            saved.append(f"{name}-{version}.yaml")
+            if args.postman and row.get("postmanCollectionLink"):
+                coll = http.get(row["postmanCollectionLink"])
+                if coll.status_code == 200:
+                    (out / f"{name}-{version}.postman.json").write_bytes(coll.content)
+            print(f"{name} {version}", flush=True)
+            time.sleep(args.gap)
+    print(f"wrote {len(saved)} OpenAPI files to {out}")
+
+
 def _collection(args):
     import chromadb
     from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
@@ -255,6 +296,12 @@ def main() -> int:
     d.add_argument("--limit", type=int, default=0, help="at most this many guides per product (testing)")
     d.add_argument("--gap", type=float, default=0.5, help="seconds between requests")
     d.add_argument("--out", default="nutanix-docs")
+    a = sub.add_parser("api-specs", help="download the Nutanix v4 API OpenAPI files")
+    a.add_argument("--api", action="append", help="API area, e.g. vmm or clustermgmt (repeatable); default: all")
+    a.add_argument("--versions", type=int, default=1, help="newest released versions of each API to keep")
+    a.add_argument("--postman", action="store_true", help="also download each version's Postman collection")
+    a.add_argument("--gap", type=float, default=0.5, help="seconds between downloads")
+    a.add_argument("--out", default="nutanix-docs")
     for name in ("index", "search"):
         p = sub.add_parser(name)
         p.add_argument("--out", default="nutanix-docs")
@@ -265,7 +312,7 @@ def main() -> int:
     if args.cmd == "products":
         print("\n".join(Portal(0.5).products()))
     else:
-        {"download": download, "index": index, "search": search}[args.cmd](args)
+        {"download": download, "api-specs": api_specs, "index": index, "search": search}[args.cmd](args)
     return 0
 
 
